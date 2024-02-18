@@ -65,6 +65,7 @@ struct screen_capture {
     CGDirectDisplayID display;
     CGWindowID window;
     NSString *application_id;
+    NSArray *application_ids;
 };
 
 bool is_screen_capture_available(void);

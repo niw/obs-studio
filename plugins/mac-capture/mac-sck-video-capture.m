@@ -68,7 +68,7 @@ static void sck_video_capture_destroy(void *data)
     if (sc->capture_delegate) {
         [sc->capture_delegate release];
     }
-    [sc->application_id release];
+    [sc->application_ids release];
 
     pthread_mutex_destroy(&sc->mutex);
     bfree(sc);
@@ -168,23 +168,21 @@ static bool init_screen_stream(struct screen_capture *sc)
         } break;
         case ScreenCaptureApplicationStream: {
             SCDisplay *target_display = get_target_display();
-            SCRunningApplication *target_application = nil;
+            NSMutableArray *target_applications_array = [[NSMutableArray alloc] init];
             for (SCRunningApplication *application in sc->shareable_content.applications) {
-                if ([application.bundleIdentifier isEqualToString:sc->application_id]) {
-                    target_application = application;
-                    break;
+                if ([sc->application_ids containsObject:application.bundleIdentifier]) {
+                    [target_applications_array addObject:application];
                 }
             }
-            NSArray *target_application_array = [[NSArray alloc] initWithObjects:target_application, nil];
             NSArray *empty_array = [[NSArray alloc] init];
             content_filter = [[SCContentFilter alloc] initWithDisplay:target_display
-                                                includingApplications:target_application_array
+                                                includingApplications:target_applications_array
                                                      exceptingWindows:empty_array];
             if (@available(macOS 14.2, *)) {
                 content_filter.includeMenuBar = YES;
             }
 
-            [target_application_array release];
+            [target_applications_array release];
             [empty_array release];
 
             set_display_mode(sc, target_display);
@@ -287,7 +285,20 @@ static void *sck_video_capture_create(obs_data_t *settings, obs_source_t *source
 
     sc->display = get_display_migrate_settings(settings);
 
-    sc->application_id = [[NSString alloc] initWithUTF8String:obs_data_get_string(settings, "application")];
+    NSMutableArray *application_ids = [[NSMutableArray alloc] init];
+    obs_data_array_t *applications = obs_data_get_array(settings, "applications");
+    if (applications) {
+        size_t count = obs_data_array_count(applications);
+        for (size_t i = 0; i < count; i++) {
+            obs_data_t *item = obs_data_array_item(applications, i);
+            const char *value = obs_data_get_string(item, "value");
+            NSString *application_id = [[NSString alloc] initWithUTF8String:value];
+            obs_data_release(item);
+            [application_ids addObject:application_id];
+            [application_id release];
+        }
+    }
+    sc->application_ids = application_ids;
     pthread_mutex_init(&sc->mutex, NULL);
 
     if (!init_screen_stream(sc))
@@ -393,7 +404,7 @@ static void sck_video_capture_defaults(obs_data_t *settings)
     CFRelease(uuid_string);
     CFRelease(display_uuid);
 
-    obs_data_set_default_string(settings, "application", NULL);
+    obs_data_set_default_array(settings, "applications", NULL);
     obs_data_set_default_int(settings, "type", ScreenCaptureDisplayStream);
     obs_data_set_default_int(settings, "window", kCGNullWindowID);
     obs_data_set_default_bool(settings, "show_cursor", true);
@@ -416,7 +427,19 @@ static void sck_video_capture_update(void *data, obs_data_t *settings)
 
     CGDirectDisplayID display = get_display_migrate_settings(settings);
 
-    NSString *application_id = [[NSString alloc] initWithUTF8String:obs_data_get_string(settings, "application")];
+    NSMutableArray *application_ids = [[NSMutableArray alloc] init];
+    obs_data_array_t *applications = obs_data_get_array(settings, "applications");
+    if (applications) {
+        size_t count = obs_data_array_count(applications);
+        for (size_t i = 0; i < count; i++) {
+            obs_data_t *item = obs_data_array_item(applications, i);
+            const char *value = obs_data_get_string(item, "value");
+            NSString *application_id = [[NSString alloc] initWithUTF8String:value];
+            obs_data_release(item);
+            [application_ids addObject:application_id];
+            [application_id release];
+        }
+    }
     bool show_cursor = obs_data_get_bool(settings, "show_cursor");
     bool hide_obs = obs_data_get_bool(settings, "hide_obs");
     bool show_empty_names = obs_data_get_bool(settings, "show_empty_names");
@@ -426,20 +449,20 @@ static void sck_video_capture_update(void *data, obs_data_t *settings)
         switch (sc->capture_type) {
             case ScreenCaptureDisplayStream: {
                 if (sc->display == display && sc->hide_cursor != show_cursor && sc->hide_obs == hide_obs) {
-                    [application_id release];
+                    [application_ids release];
                     return;
                 }
             } break;
             case ScreenCaptureWindowStream: {
                 if (old_window_id == sc->window && sc->hide_cursor != show_cursor) {
-                    [application_id release];
+                    [application_ids release];
                     return;
                 }
             } break;
             case ScreenCaptureApplicationStream: {
-                if (sc->display == display && [application_id isEqualToString:sc->application_id] &&
+                if (sc->display == display && [application_ids isEqual:sc->application_ids] &&
                     sc->hide_cursor != show_cursor) {
-                    [application_id release];
+                    [application_ids release];
                     return;
                 }
             } break;
@@ -451,8 +474,8 @@ static void sck_video_capture_update(void *data, obs_data_t *settings)
     destroy_screen_stream(sc);
     sc->capture_type = capture_type;
     sc->display = display;
-    [sc->application_id release];
-    sc->application_id = application_id;
+    [sc->application_ids release];
+    sc->application_ids = application_ids;
     sc->hide_cursor = !show_cursor;
     sc->hide_obs = hide_obs;
     sc->show_empty_names = show_empty_names;
@@ -472,7 +495,7 @@ static bool content_settings_changed(void *data, obs_properties_t *props, obs_pr
     unsigned int capture_type_id = (unsigned int) obs_data_get_int(settings, "type");
     obs_property_t *display_list = obs_properties_get(props, "display_uuid");
     obs_property_t *window_list = obs_properties_get(props, "window");
-    obs_property_t *app_list = obs_properties_get(props, "application");
+    obs_property_t *app_list = obs_properties_get(props, "applications");
     obs_property_t *empty = obs_properties_get(props, "show_empty_names");
     obs_property_t *hidden = obs_properties_get(props, "show_hidden_windows");
     obs_property_t *hide_obs = obs_properties_get(props, "hide_obs");
@@ -530,7 +553,6 @@ static bool content_settings_changed(void *data, obs_properties_t *props, obs_pr
     screen_capture_build_content_list(sc, capture_type_id == ScreenCaptureDisplayStream);
     build_display_list(sc, props);
     build_window_list(sc, props);
-    build_application_list(sc, props);
 
     return true;
 }
@@ -568,8 +590,8 @@ static obs_properties_t *sck_video_capture_properties(void *data)
     obs_property_t *display_list = obs_properties_add_list(
         props, "display_uuid", obs_module_text("DisplayCapture.Display"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 
-    obs_property_t *app_list = obs_properties_add_list(props, "application", obs_module_text("Application"),
-                                                       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+    obs_property_t *app_list = obs_properties_add_editable_list(props, "applications", obs_module_text("Applications"),
+                                                                OBS_EDITABLE_LIST_TYPE_STRINGS, NULL, NULL);
 
     obs_property_t *window_list = obs_properties_add_list(props, "window", obs_module_text("WindowUtils.Window"),
                                                           OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
